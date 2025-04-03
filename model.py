@@ -7,13 +7,12 @@ from keras.regularizers import L1, L2
 import tensorflow as tf
 
 
-# %% Multi-head self Attention (MHA) block
-def mha_block(input_feature, key_dim=8, num_heads=2, dropout=0.5, vanilla=True):
-    # Layer normalization
+def mha_block(input_feature, key_dim=8, num_heads=2, dropout=0.5):
+    # layer normalization
     x = LayerNormalization(epsilon=1e-6)(input_feature)
     x = MultiHeadAttention(key_dim=key_dim, num_heads=num_heads, dropout=dropout)(x, x)
     x = Dropout(0.3)(x)
-    # Skip connection
+    # skip connection
     mha_feature = Add()([input_feature, x])
 
     return mha_feature
@@ -45,26 +44,14 @@ def conv_block(input_layer, F1=4, kernLength=64, poolSize=8, D=2, in_chans=22, d
 
 def TCN_block(input_layer, input_dimension, depth, kernel_size, filters, dropout,
                weightDecay=0.009, activation='relu'):
-    """ TCN_block from Bai et al 2018
-        Temporal Convolutional Network (TCN)
-
-        Notes
-        -----
-        using different regularization methods
-    """
-
     block = Conv1D(filters, kernel_size=kernel_size, dilation_rate=1, activation='linear',
                    kernel_regularizer=L2(weightDecay),
-                   # kernel_constraint=max_norm(maxNorm, axis=[0, 1]),
-
                    padding='causal', kernel_initializer='he_uniform')(input_layer)
     block = BatchNormalization()(block)
     block = Activation(activation)(block)
     block = Dropout(dropout)(block)
     block = Conv1D(filters, kernel_size=kernel_size, dilation_rate=1, activation='linear',
                    kernel_regularizer=L2(weightDecay),
-                   # kernel_constraint=max_norm(maxNorm, axis=[0, 1]),
-
                    padding='causal', kernel_initializer='he_uniform')(block)
     block = BatchNormalization()(block)
     block = Activation(activation)(block)
@@ -72,8 +59,6 @@ def TCN_block(input_layer, input_dimension, depth, kernel_size, filters, dropout
     if (input_dimension != filters):
         conv = Conv1D(filters, kernel_size=1,
                       kernel_regularizer=L2(weightDecay),
-                      # kernel_constraint=max_norm(maxNorm, axis=[0, 1]),
-
                       padding='same')(input_layer)
         added = Add()([block, conv])
     else:
@@ -83,16 +68,12 @@ def TCN_block(input_layer, input_dimension, depth, kernel_size, filters, dropout
     for i in range(depth - 1):
         block = Conv1D(filters, kernel_size=kernel_size, dilation_rate=2 ** (i + 1), activation='linear',
                        kernel_regularizer=L2(weightDecay),
-                       # kernel_constraint=max_norm(maxNorm, axis=[0, 1]),
-
                        padding='causal', kernel_initializer='he_uniform')(out)
         block = BatchNormalization()(block)
         block = Activation(activation)(block)
         block = Dropout(dropout)(block)
         block = Conv1D(filters, kernel_size=kernel_size, dilation_rate=2 ** (i + 1), activation='linear',
                        kernel_regularizer=L2(weightDecay),
-                       # kernel_constraint=max_norm(maxNorm, axis=[0, 1]),
-
                        padding='causal', kernel_initializer='he_uniform')(block)
         block = BatchNormalization()(block)
         block = Activation(activation)(block)
@@ -114,24 +95,22 @@ def DDF(n_classes, Chans=22, Samples=1125):
     input2 = mha_block(block1)
 
     decay = 0.01
-    block2_1 = TCN_block(input_layer=input2, input_dimension=64, depth=2,
+    block2 = TCN_block(input_layer=input2, input_dimension=64, depth=2,
                                kernel_size=4, filters=64, weightDecay=decay,
                                dropout=0.3, activation='elu')
-    block2_1 = Lambda(lambda x: x[:, -1, :])(block2_1)
-    block2_1 = Dense(n_classes, kernel_regularizer=L2(0.5))(block2_1)
+    block2 = Lambda(lambda x: x[:, -1, :])(block2)
+    block2 = Dense(n_classes, kernel_regularizer=L2(0.5))(block2)
 
-    block2_2 = Bidirectional(GRU(units=32, kernel_regularizer=L2(1e-7), dropout=0.3))(input2)
-    block2_2 = tf.expand_dims(block2_2, axis=-1)
-    block2_2 = mha_block(block2_2)
-    block2_2 = Lambda(lambda x: x[:, :, -1])(block2_2)
-    block2_2 = Dense(n_classes, kernel_regularizer=L2(0.5))(block2_2)
-
-    block3 = Average()([block2_1, block2_2])  # [none, 64 + 64]
+    block3 = Bidirectional(GRU(units=64, kernel_regularizer=L2(1e-7), return_sequences=True))(input2)
+    block3 = Conv1D(filters=64, kernel_size=1, kernel_regularizer=L2(0.8), activation='elu', padding='same')(block3)
+    block3 = Add()([block3, input2])
     block3 = tf.expand_dims(block3, axis=-1)
-    block3 = mha_block(block3)
-    block3 = Lambda(lambda x: x[:, :, -1])(block3)
+    block3 = MultiHeadAttention(key_dim=8, num_heads=2, dropout=0.5)(block3, block3)
+    block3 = Dropout(rate=0.5)(block3)
     block3 = Flatten()(block3)
+    block3 = Dense(n_classes, kernel_regularizer=L2(0.5))(block3)
 
-    block3 = Dense(n_classes, kernel_constraint=max_norm(.25))(block3)
-    softmax = Activation('softmax', name='softmax')(block3)
+    block4 = Average()([block2, block3])
+    block4 = Dense(n_classes, kernel_constraint=max_norm(.25))(block4)
+    softmax = Activation('softmax', name='softmax')(block4)
     return Model(inputs=input, outputs=softmax)
